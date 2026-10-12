@@ -1,0 +1,8 @@
+# credentials, passwords, key pairs, resource state: never commit
+secrets/
+*.pem
+*.key
+*credentials*
+.env
+.env.*
+.DS_Store

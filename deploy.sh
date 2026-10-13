@@ -48,7 +48,8 @@ VPC=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[
 [ "$VPC" != None ] || die "no default VPC in $REGION"
 
 if [ -n "$DRY" ]; then
-  aws ec2 run-instances --dry-run --image-id "$AMI" --instance-type "$INSTANCE_TYPE" 2>&1 | grep -q DryRunOperation \
+  out=$(aws ec2 run-instances --dry-run --image-id "$AMI" --instance-type "$INSTANCE_TYPE" 2>&1 || true)
+  grep -q DryRunOperation <<<"$out" \
     && log "Dry run OK: launch permitted (the G-instance vCPU quota is only checked on a real launch)" \
     || die "run-instances dry run failed"
   exit 0

@@ -1,5 +1,4 @@
-<powershell>
-# First-boot setup for the gaming VM. EC2Launch v2 re-runs this on every boot (<persist>), so it works through
+# First-boot setup for the gaming VM. EC2Launch v2 runs this on every boot (frequency: always), so it works through
 # stages, marks each one done in C:\cloud-gaming, reboots where drivers need it, and exits early once finished.
 # deploy.sh fills in the __PLACEHOLDERS__. Log: C:\cloud-gaming\setup.log
 $ErrorActionPreference = 'Continue'
@@ -17,6 +16,8 @@ $SunshinePassword = '__SUNSHINE_PASSWORD__'
 $DriverUrl        = '__DRIVER_URL__'
 $DriverFile       = '__DRIVER_FILE__'
 $SunshineUrl      = '__SUNSHINE_URL__'
+$SshPubKey        = '__SSH_PUBKEY__'
+$OpenSshMsiUrl    = 'https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64-v10.0.0.0.msi'
 $VddUrl           = 'https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip'
 $NefconUrl        = 'https://github.com/nefarius/nefcon/releases/download/v1.21.0/nefcon_v1.21.0.zip'
 $SteamUrl         = 'https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe'
@@ -24,17 +25,24 @@ $GridCertUrl      = 'https://nvidia-gaming.s3.amazonaws.com/GridSwCert-Archive/G
 $DeadlockAppId    = 1422450
 
 function Done($s) { Test-Path "$Root\$s.done" }
-function Mark($s) { New-Item -ItemType File -Force -Path "$Root\$s.done" | Out-Null; Write-Output "== stage $s done $(Get-Date -Format o)" }
+# Progress also goes to the serial console, readable from the Mac: aws ec2 get-console-output --latest
+function Say($msg) {
+  Write-Output $msg
+  try { $c = New-Object IO.Ports.SerialPort COM1, 115200; $c.Open(); $c.WriteLine("cloud-gaming: $msg"); $c.Close() } catch {}
+}
+function Mark($s) { New-Item -ItemType File -Force -Path "$Root\$s.done" | Out-Null; Say "stage $s done" }
 function Fetch($url, $out) {
   for ($i = 1; $i -le 5; $i++) {
     try { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out; return } catch { Write-Output "download retry $i ($url): $_"; Start-Sleep 15 }
   }
-  throw "download failed: $url"
+  Say "download failed: $url"; throw "download failed: $url"
 }
-function Reboot { Stop-Transcript; Restart-Computer -Force; exit 0 }
+function Reboot { Say 'rebooting'; Stop-Transcript; Restart-Computer -Force; exit 0 }
+Say "setup script started; done so far: $((Get-ChildItem $Root -Filter *.done).BaseName -join ', ')"
 
 # ---- 1. Windows basics -------------------------------------------------------------------------------------------
 if (-not (Done 'base')) {
+  Say 'stage base starting'
   net user Administrator $AdminPassword
 
   # Auto-logon: Sunshine streams the console session, so a user must be logged in at boot.
@@ -70,8 +78,28 @@ if (-not (Done 'base')) {
   Mark 'base'
 }
 
+# ---- 1b. SSH (admin access with secrets/cloud-gaming.pem; ./ssh.sh) --------------------------------------------
+if (-not (Done 'ssh')) {
+  Say 'stage ssh starting'
+  Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
+  if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
+    Fetch $OpenSshMsiUrl "$Root\openssh.msi"
+    Start-Process msiexec.exe -ArgumentList '/i', "`"$Root\openssh.msi`"", '/qn', '/norestart' -Wait
+  }
+  $ak = 'C:\ProgramData\ssh\administrators_authorized_keys'
+  New-Item -ItemType Directory -Force 'C:\ProgramData\ssh' | Out-Null
+  Set-Content $ak $SshPubKey -Encoding ASCII
+  icacls $ak /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+  New-Item -Force 'HKLM:\SOFTWARE\OpenSSH' | Out-Null
+  New-ItemProperty 'HKLM:\SOFTWARE\OpenSSH' DefaultShell -Value "$PSHOME\powershell.exe" -PropertyType String -Force | Out-Null
+  Set-Service sshd -StartupType Automatic; Start-Service sshd
+  New-NetFirewallRule -DisplayName 'SSH' -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow | Out-Null
+  Mark 'ssh'
+}
+
 # ---- 2. NVIDIA gaming driver (T4 in graphics mode + NVENC) ------------------------------------------------------
 if (-not (Done 'nvidia')) {
+  Say 'stage nvidia starting'
   $dl = "$Root\$DriverFile"
   Fetch $DriverUrl $dl
   if ($dl -like '*.zip') {
@@ -79,8 +107,12 @@ if (-not (Done 'nvidia')) {
     $exe = Get-ChildItem "$Root\nvidia" -Recurse -Filter *.exe | Sort-Object Length -Descending | Select-Object -First 1
   } else { $exe = Get-Item $dl }
   Write-Output "installing $($exe.FullName)"
-  $p = Start-Process $exe.FullName -ArgumentList '-s', '-noreboot', '-clean' -Wait -PassThru
-  Write-Output "nvidia installer exit code $($p.ExitCode)"
+  $p = Start-Process $exe.FullName -ArgumentList '-s', '-noreboot', '-clean' -PassThru
+  if (-not $p.WaitForExit(20 * 60 * 1000)) {
+    Say 'nvidia installer still running after 20 min; killing it'
+    Get-Process | Where-Object { $_.Path -like "$Root\*" -or $_.Name -match '^setup$' } | Stop-Process -Force
+  }
+  Say "nvidia installer exit code $($p.ExitCode)"
 
   # Unlock the gaming (non-GRID) license, per the AWS docs for the nvidia-gaming driver.
   New-Item -Force 'HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\Global' | Out-Null
@@ -92,6 +124,7 @@ if (-not (Done 'nvidia')) {
 
 # ---- 3. Virtual monitor (the GPU has no physical display for Sunshine to capture) -------------------------------
 if (-not (Done 'vdd')) {
+  Say 'stage vdd starting'
   Fetch $VddUrl "$Root\vdd.zip";       Expand-Archive "$Root\vdd.zip" "$Root\vdd" -Force
   Fetch $NefconUrl "$Root\nefcon.zip"; Expand-Archive "$Root\nefcon.zip" "$Root\nefcon" -Force
   $inf = (Get-ChildItem "$Root\vdd" -Recurse -Filter MttVDD.inf | Select-Object -First 1).FullName
@@ -126,12 +159,13 @@ if (-not (Done 'vdd')) {
 
 # ---- 4. Steam + Sunshine ---------------------------------------------------------------------------------------
 if (-not (Done 'apps')) {
+  Say 'stage apps starting'
   Fetch $SteamUrl "$Root\SteamSetup.exe"
   Start-Process "$Root\SteamSetup.exe" -ArgumentList '/S' -Wait
 
   Fetch $SunshineUrl "$Root\sunshine.msi"
   $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$Root\sunshine.msi`"", '/qn', '/norestart', '/l*v', "`"$Root\sunshine-msi.log`"" -Wait -PassThru
-  Write-Output "sunshine msi exit code $($p.ExitCode)"
+  Say "sunshine msi exit code $($p.ExitCode)"
   $sun = 'C:\Program Files\Sunshine'
   Get-Service -Name *sunshine* -ErrorAction SilentlyContinue | Stop-Service -Force
 
@@ -169,5 +203,3 @@ for /f "skip=1 tokens=3" %%s in ('query user %USERNAME%') do tscon %%s /dest:con
   Reboot
 }
 Stop-Transcript
-</powershell>
-<persist>true</persist>

@@ -30,19 +30,7 @@ AMI=$(aws ec2 describe-images --owners amazon --filters "Name=name,Values=$AMI_N
 [ "$AMI" != None ] || die "no AMI matches $AMI_NAME"
 log "AMI $AMI"
 
-# NVIDIA gaming driver: AWS hosts it in a bucket that needs signed requests; the VM gets a 7-day presigned URL.
-DRIVER_KEY=$(aws s3api list-objects-v2 --bucket nvidia-gaming --prefix windows/latest/ \
-  --query 'sort_by(Contents,&LastModified)[?ends_with(Key,`.zip`) || ends_with(Key,`.exe`)] | [-1].Key' --output text 2>&1) \
-  || die "can't list s3://nvidia-gaming ($DRIVER_KEY). The ai-agent user (and its permissions boundary) needs
-  s3:ListBucket + s3:GetObject on arn:aws:s3:::nvidia-gaming and arn:aws:s3:::nvidia-gaming/*"
-[ -n "$DRIVER_KEY" ] && [ "$DRIVER_KEY" != None ] || die "no driver found under s3://nvidia-gaming/windows/latest/"
-log "NVIDIA driver s3://nvidia-gaming/$DRIVER_KEY"
-DRIVER_URL=$(aws s3 presign "s3://nvidia-gaming/$DRIVER_KEY" --expires-in 604800)
-curl -fsS -r 0-0 -o /dev/null "$DRIVER_URL" || die "presigned driver URL doesn't work (s3:GetObject denied?)"
-
-SUNSHINE_URL=$(curl -fsS https://api.github.com/repos/LizardByte/Sunshine/releases/latest |
-  python3 -c 'import json,sys; print(next(a["browser_download_url"] for a in json.load(sys.stdin)["assets"] if a["name"]=="Sunshine-Windows-AMD64-installer.msi"))')
-log "Sunshine $SUNSHINE_URL"
+setup_inputs
 
 VPC=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
 [ "$VPC" != None ] || die "no default VPC in $REGION"
@@ -79,15 +67,7 @@ save_state
 sync_sg_ip
 
 USERDATA=$(mktemp); trap 'rm -f "$USERDATA"' EXIT
-ADMIN_PASSWORD=$(secret admin-password) SUNSHINE_PASSWORD=$(secret sunshine-password) \
-DRIVER_URL=$DRIVER_URL DRIVER_FILE=$(basename "$DRIVER_KEY") SUNSHINE_URL=$SUNSHINE_URL \
-python3 - "$ROOT/windows/setup.ps1" > "$USERDATA" <<'PY'
-import os, sys
-s = open(sys.argv[1]).read()
-for k in ("ADMIN_PASSWORD", "SUNSHINE_PASSWORD", "DRIVER_URL", "DRIVER_FILE", "SUNSHINE_URL"):
-    s = s.replace(f"__{k}__", os.environ[k].replace("'", "''"))
-sys.stdout.write(s)
-PY
+render_userdata "$USERDATA"
 
 log "Launching $INSTANCE_TYPE"
 INSTANCE_ID=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$INSTANCE_TYPE" --key-name "$KEY_NAME" \

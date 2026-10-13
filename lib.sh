@@ -53,8 +53,8 @@ public_ip() {
     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
 }
 
-# Moonlight/Sunshine ports + RDP, open only to this Mac's current public IP.
-SG_RULES_TCP="47984 47989 47990 48010 3389"
+# Moonlight/Sunshine ports + RDP + SSH, open only to this Mac's current public IP.
+SG_RULES_TCP="47984 47989 47990 48010 3389 22"
 SG_RULES_UDP="47998 47999 48000 48002 48010"
 
 sg_permissions() {
@@ -64,16 +64,55 @@ sg_permissions() {
   echo "[${perms%,}]"
 }
 
-# Re-point the security group at the current public IP (home IPs change).
+# Re-point the security group at the current public IP (home IPs change) and the port list above.
 sync_sg_ip() {
-  local cidr current
+  local cidr current want p
   cidr="$(my_ip)/32"
   current=$(aws ec2 describe-security-groups --group-ids "$SG_ID" \
-    --query 'SecurityGroups[0].IpPermissions[].IpRanges[].CidrIp' --output text | tr '\t' '\n' | sort -u | tr -d '\n')
-  if [ "$current" = "$cidr" ]; then return; fi
+    --query 'SecurityGroups[0].IpPermissions[].[IpProtocol,FromPort,IpRanges[0].CidrIp]' --output text | sort)
+  want=$( { for p in $SG_RULES_TCP; do printf 'tcp\t%s\t%s\n' "$p" "$cidr"; done
+            for p in $SG_RULES_UDP; do printf 'udp\t%s\t%s\n' "$p" "$cidr"; done; } | sort)
+  if [ "$current" = "$want" ]; then return; fi
   log "Allowing $cidr in security group $SG_ID"
   local old
   old=$(aws ec2 describe-security-groups --group-ids "$SG_ID" --query 'SecurityGroups[0].IpPermissions' --output json)
   [ "$old" != "[]" ] && aws ec2 revoke-security-group-ingress --group-id "$SG_ID" --ip-permissions "$old" >/dev/null
   aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --ip-permissions "$(sg_permissions "$cidr")" >/dev/null
+}
+
+# Download links windows/setup.ps1 needs. The NVIDIA gaming driver sits in an AWS bucket that needs signed requests,
+# so the VM gets a 7-day presigned URL.
+setup_inputs() {
+  DRIVER_KEY=$(aws s3api list-objects-v2 --bucket nvidia-gaming --prefix windows/latest/ \
+    --query 'sort_by(Contents,&LastModified)[?ends_with(Key,`.zip`) || ends_with(Key,`.exe`)] | [-1].Key' --output text 2>&1) \
+    || die "can't list s3://nvidia-gaming ($DRIVER_KEY). The ai-agent user (and its permissions boundary) needs
+  s3:ListBucket + s3:GetObject on arn:aws:s3:::nvidia-gaming and arn:aws:s3:::nvidia-gaming/*"
+  [ -n "$DRIVER_KEY" ] && [ "$DRIVER_KEY" != None ] || die "no driver found under s3://nvidia-gaming/windows/latest/"
+  log "NVIDIA driver s3://nvidia-gaming/$DRIVER_KEY"
+  # The bucket is in us-east-1: a link signed for another region gets a 301 redirect that breaks the signature.
+  DRIVER_URL=$(aws s3 presign "s3://nvidia-gaming/$DRIVER_KEY" --region us-east-1 --expires-in 604800)
+  [ "$(curl -sS -r 0-0 -o /dev/null -w '%{http_code}' "$DRIVER_URL")" = 206 ] \
+    || die "presigned driver URL doesn't work (s3:GetObject denied?)"
+
+  SUNSHINE_URL=$(curl -fsS https://api.github.com/repos/LizardByte/Sunshine/releases/latest |
+    python3 -c 'import json,sys; print(next(a["browser_download_url"] for a in json.load(sys.stdin)["assets"] if a["name"]=="Sunshine-Windows-AMD64-installer.msi"))')
+  log "Sunshine $SUNSHINE_URL"
+}
+
+# Fill windows/setup.ps1's placeholders and write the result to $1.
+render_userdata() {
+  ADMIN_PASSWORD=$(secret admin-password) SUNSHINE_PASSWORD=$(secret sunshine-password) \
+  DRIVER_URL=$DRIVER_URL DRIVER_FILE=$(basename "$DRIVER_KEY") SUNSHINE_URL=$SUNSHINE_URL \
+  SSH_PUBKEY=$(ssh-keygen -y -f "$SECRETS/$KEY_NAME.pem") \
+  python3 - "$ROOT/windows/setup.ps1" > "$1" <<'PY'
+import os, sys
+s = open(sys.argv[1]).read()
+for k in ("ADMIN_PASSWORD", "SUNSHINE_PASSWORD", "DRIVER_URL", "DRIVER_FILE", "SUNSHINE_URL", "SSH_PUBKEY"):
+    s = s.replace(f"__{k}__", os.environ[k].replace("'", "''"))
+# EC2Launch v2 YAML user data: run the script as SYSTEM on every boot.
+body = "\n".join(("      " + l) if l.strip() else "" for l in s.splitlines())
+sys.stdout.write("version: 1.0\ntasks:\n- task: executeScript\n  inputs:\n  - frequency: always\n"
+                 "    type: powershell\n    runAs: localSystem\n    content: |-\n" + body + "\n")
+PY
+  [ "$(wc -c < "$1")" -lt 16384 ] || die "user data is over EC2's 16 KB limit"
 }

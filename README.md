@@ -36,3 +36,11 @@ Moonlight settings: resolution 1920x1080 or 1728x1117 (14" MBP native/2), 60 FPS
 - If your home IP changed, re-run `./deploy.sh`.
 - Launch fails with `VcpuLimitExceeded`: request at least 8 vCPUs of quota `L-DB2E81BA` (Running On-Demand G and VT
   instances) for ap-southeast-1 in Service Quotas.
+
+## Admin access
+
+- `./ssh.sh` opens a PowerShell session on the VM as Administrator; `./ssh.sh '<command>'` runs one command.
+- Setup progress is written to the serial console: `aws ec2 get-console-output --instance-id <id> --latest`
+  (lines start with `cloud-gaming:`); the full log is `C:\cloud-gaming\setup.log` on the VM.
+- `./resetup.sh` re-runs first-boot setup with the current `windows/setup.ps1` (stops, swaps user data, starts).
+  Stages already done are skipped; delete `C:\cloud-gaming\<stage>.done` on the VM to redo one.

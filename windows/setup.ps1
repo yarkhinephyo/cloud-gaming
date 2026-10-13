@@ -20,7 +20,8 @@ $SshPubKey        = '__SSH_PUBKEY__'
 $OpenSshMsiUrl    = 'https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64-v10.0.0.0.msi'
 $VddUrl           = 'https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip'
 $NefconUrl        = 'https://github.com/nefarius/nefcon/releases/download/v1.21.0/nefcon_v1.21.0.zip'
-$SteamUrl         = 'https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe'
+$VbCableUrl       = 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip'
+$SteamUrl         ='https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe'
 $GridCertUrl      = 'https://nvidia-gaming.s3.amazonaws.com/GridSwCert-Archive/GridSwCertWindows_2024_02_22.cert'
 $DeadlockAppId    = 1422450
 
@@ -154,6 +155,12 @@ if (-not (Done 'vdd')) {
   # Make the virtual monitor the only display, so games and Sunshine use it (and the NVIDIA GPU).
   Get-PnpDevice -Class Display | Where-Object FriendlyName -like '*Basic Display*' | Disable-PnpDevice -Confirm:$false
   Get-PnpDevice -Class Display | Format-Table -AutoSize FriendlyName, Status | Out-String | Write-Output
+
+  # Virtual sound card for Sunshine to capture: the VM has none, and Steam only adds its streaming speakers when
+  # its own Remote Play is used. VB-Cable's driver is Microsoft-signed, so this needs no trust prompt.
+  Fetch $VbCableUrl "$Root\vbcable.zip"; Expand-Archive "$Root\vbcable.zip" "$Root\vbcable" -Force
+  Start-Process $nefcon -Wait -ArgumentList '--create-device-node', '--hardware-id', 'VBAudioVACWDM', '--class-name', 'MEDIA', '--class-guid', '4d36e96c-e325-11ce-bfc1-08002be10318'
+  Start-Process $nefcon -Wait -ArgumentList '--install-driver', '--inf-path', "`"$Root\vbcable\vbMmeCable64_win10.inf`""
   Mark 'vdd'
 }
 

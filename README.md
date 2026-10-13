@@ -1,13 +1,13 @@
 # Cloud gaming: Deadlock on AWS via Sunshine + Moonlight
 
-Windows Server 2022 on a `g4dn.2xlarge` (NVIDIA T4, 8 vCPU) in Singapore (`ap-southeast-1`, ~10 ms from home), with the
+Windows Server 2022 on a `g4dn.8xlarge` (NVIDIA T4, 32 vCPU; set in `config.env`) in Singapore (`ap-southeast-1`, ~10 ms from home), with the
 NVIDIA gaming driver, a virtual monitor, Sunshine (host) and Steam. Moonlight on the Mac is the client.
 Settings: `config.env`. Secrets, passwords and resource ids: `secrets/` (gitignored, mode 600).
 
 | Command | What it does |
 |---|---|
 | `./deploy.sh` | First run: creates everything and waits ~20-30 min for setup. Later: resumes a paused VM. Always re-points the firewall at your current IP. |
-| `./pause.sh` | Stops the VM. No GPU charges; disk + Elastic IP kept (~$18/month). |
+| `./pause.sh` | Stops the VM. No GPU charges; disk + Elastic IP kept (~$24/month). |
 | `./cleanup.sh` | Deletes everything (instance, disk incl. Steam library, Elastic IP, security group, key pair). |
 | `./status.sh` | State, address, whether Sunshine answers. |
 | `./pair.sh <PIN>` | Approves Moonlight's pairing PIN (once per Mac). |
@@ -23,7 +23,7 @@ Moonlight settings: resolution 1920x1080 or 1728x1117 (14" MBP native/2), 60 FPS
 "Optimize mouse for remote desktop" off. Press Ctrl+Option+Shift+M to capture the mouse, and Ctrl+Option+Shift+Q to quit the stream.
 
 ## Costs (approximate)
-- Running: about $1.35/hour (g4dn.2xlarge Windows on-demand in Singapore) plus data out (~$0.12/GB, ~15-20 GB per hour at 40 Mbps).
+- Running: about $4.40/hour on g4dn.8xlarge ($1.35 on 2xlarge, ~$2.10 on 4xlarge; Windows on-demand in Singapore, est.) plus data out (~$0.12/GB, ~15-20 GB per hour at 40 Mbps).
 - Paused: 150 GB gp3 (~$14/mo) + Elastic IP (~$3.6/mo).
 - **Pause when you're done.** A forgotten running VM costs about $1,000/month.
 
@@ -36,6 +36,11 @@ Moonlight settings: resolution 1920x1080 or 1728x1117 (14" MBP native/2), 60 FPS
 - If your home IP changed, re-run `./deploy.sh`.
 - Launch fails with `VcpuLimitExceeded`: request at least 8 vCPUs of quota `L-DB2E81BA` (Running On-Demand G and VT
   instances) for ap-southeast-1 in Service Quotas.
+
+## Change size
+
+Set `INSTANCE_TYPE` in `config.env`, then `./pause.sh && ./deploy.sh`: the stopped VM is switched over in place
+(same disk, IP and setup). Needs enough G-instance vCPU quota; if AWS refuses, it goes back to the old size.
 
 ## Admin access
 

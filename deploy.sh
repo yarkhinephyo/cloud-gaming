@@ -5,13 +5,32 @@
 source "$(dirname "$0")/lib.sh"
 DRY=${1:-}
 
+# Start the stopped VM, first switching it to INSTANCE_TYPE if config.env changed (same disk, IP and setup). If AWS
+# won't start the new size (usually the G-instance vCPU quota), go back to the old one so the VM still starts.
+start_stopped() {
+  local cur out
+  cur=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].InstanceType' --output text)
+  if [ "$cur" != "$INSTANCE_TYPE" ]; then
+    log "Resizing $cur -> $INSTANCE_TYPE"
+    aws ec2 modify-instance-attribute --instance-id "$INSTANCE_ID" --instance-type "Value=$INSTANCE_TYPE"
+  fi
+  log "Starting $INSTANCE_ID"
+  out=$(aws ec2 start-instances --instance-ids "$INSTANCE_ID" 2>&1) && return
+  echo "$out" >&2
+  [ "$cur" != "$INSTANCE_TYPE" ] || die "start failed"
+  aws ec2 modify-instance-attribute --instance-id "$INSTANCE_ID" --instance-type "Value=$cur"
+  grep -q VcpuLimitExceeded <<<"$out" && die "vCPU quota too low for $INSTANCE_TYPE; switched back to $cur. Request a
+  higher 'Running On-Demand G and VT instances' (L-DB2E81BA) quota in $REGION, then re-run."
+  die "couldn't start as $INSTANCE_TYPE; switched back to $cur"
+}
+
 start_existing() {
   local st; st=$(instance_state)
   sync_sg_ip
   case $st in
     running) log "Already running" ;;
     stopping) log "Waiting for stop to finish"; aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID"; start_existing; return ;;
-    stopped) log "Starting $INSTANCE_ID"; aws ec2 start-instances --instance-ids "$INSTANCE_ID" >/dev/null ;;
+    stopped) start_stopped ;;
     pending) ;;
     *) die "instance $INSTANCE_ID is $st; run ./cleanup.sh and deploy again" ;;
   esac

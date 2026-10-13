@@ -132,8 +132,9 @@ if (-not (Done 'vdd')) {
   $cat = Join-Path (Split-Path $inf) 'mttvdd.cat'
   $nefcon = "$Root\nefcon\x64\nefconw.exe"
 
-  # MacBook-native modes (16:10 and notch-friendly) plus the usual 16:9 ones; Sunshine switches to the client's.
-  $modes = '1280x800','1440x900','1470x956','1512x982','1680x1050','1728x1117','1920x1080','1920x1200',
+  # The first mode is the default. Sunshine doesn't switch modes here (see sunshine.conf), so 1920x1200 (16:10, like
+  # a MacBook) is what gets streamed; the rest are there to pick by hand in Windows display settings.
+  $modes = '1920x1200','1280x800','1440x900','1470x956','1512x982','1680x1050','1728x1117','1920x1080',
            '2560x1440','2560x1600','2880x1864','3024x1964','3456x2234'
   $res = ($modes | ForEach-Object { $w, $h = $_ -split 'x'; "<resolution><width>$w</width><height>$h</height><refresh_rate>60</refresh_rate></resolution>" }) -join ''
   New-Item -ItemType Directory -Force 'C:\VirtualDisplayDriver' | Out-Null
@@ -176,11 +177,13 @@ if (-not (Done 'apps')) {
   $sun = 'C:\Program Files\Sunshine'
   Get-Service -Name *sunshine* -ErrorAction SilentlyContinue | Stop-Service -Force
 
+  # dd_configuration_option = disabled: with the VDD, the NVIDIA and the EC2 default display all present, Sunshine's
+  # "only this display" switch hung the launch request. Streaming the VDD as-is works.
   Set-Content "$sun\config\sunshine.conf" -Encoding ASCII -Value @"
 sunshine_name = aws-deadlock
 origin_web_ui_allowed = wan
 encoder = nvenc
-dd_configuration_option = ensure_only_display
+dd_configuration_option = disabled
 dd_resolution_option = auto
 dd_refresh_rate_option = auto
 "@
